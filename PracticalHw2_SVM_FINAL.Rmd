@@ -1,0 +1,612 @@
+---
+title: "PracticalHw2_SVM"
+output: html_document
+date: "2025-04-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+The second practical homework will explore the use of support vector models for classification. Using the concepts from our two lectures on support vector models, your task is to explore how health behaviors impact health outcomes. The data was collected via the National Health Interview Survey and was accessed through IPUMS Health Survey^1^. This data set contains variables regarding respondent's demographics, 5 major health conditions such as (cancer, heart disease, diabetes, heart attack and stroke) and their lifestyle and behaviors like work hours, physical activity, sleep habits, and eating habits. Details about the specific variables and the key to decoding the meaning of numeric values for each variable can be found in the codebook. 
+
+**Your task is to predict the presence of one of these 5 diseases based on demographics and habits.**
+
+You should explore and be creative with your answers. The main task is to perform the prediction, but you should also interrogate the data and pose questions that are interesting to you. 
+
+You are welcome to subset the data in any way you like, e.g. only look at married couples, or only focus on children, but you should investigate the relationships among at least **5 total variables and the 3 models types (linear, radial, and polynomial kernels).** The 5 variables do not each have to be in every model. 
+
+## Data Cleaning
+
+First, we will import the National Health Interview Survey data set. According to Medical News Today, the onset of diabetes is most common for people ages 45 to 65, therefore we will subset the data to adults who are 45 years old or older to see what demographics and habits as older adults can predict diabetes ([Medical News Today](https://www.medicalnewstoday.com/articles/317375)).
+
+```{r}
+# import data
+nhis <- read.csv("nhis_2022.csv")
+
+# filter age over 45
+library(dplyr)
+nhis <- nhis %>%
+  filter(AGE >= 45)
+```
+
+```{r}
+### Explore Target Variables
+
+# check classifications
+table(nhis$DIABETICEV)
+nhis <- nhis %>%
+  filter(DIABETICEV %in% c(1, 2)) %>%
+  mutate(
+    DIABETICEV = ifelse(DIABETICEV == 2, 1, 0)
+  )
+  # recode target variable: 0 = No and 1 = Yes
+
+# ensure target variable is treated as factor (classification)
+nhis$DIABETICEV <- factor(nhis$DIABETICEV, levels = c(0, 1), labels = c("No", "Yes"))
+table(nhis$DIABETICEV)
+```
+
+```{r}
+### Renaming Variables
+nhis <- nhis %>%
+  rename(
+    survey_year = YEAR,
+    household_serial = SERIAL,
+    variance_stratum = STRATA,
+    primary_sampling_unit = PSU,
+    household_id = NHISHID,
+    region = REGION,
+    person_number = PERNUM,
+    person_id = NHISPID,
+    household_number = HHX,
+    sample_weight = SAMPWEIGHT,
+    sample_adult_flag = ASTATFLG,
+    sample_child_flag = CSTATFLG,
+    age = AGE,
+    sex = SEX,
+    marital_status = MARSTCUR,
+    education_level = EDUC,
+    hours_worked_wk = HOURSWRK,
+    poverty_ratio = POVERTY,
+    height_in = HEIGHT,
+    weight_lb = WEIGHT,
+    bmi = BMICALC,
+    health_insurance_status = HINOTCOVE,
+    ever_had_cancer = CANCEREV,
+    ever_had_heart_disease = CHEARTDIEV,
+    ever_had_diabetes = DIABETICEV,
+    ever_had_heart_attack = HEARTATTEV,
+    ever_had_stroke = STROKEV,
+    alcohol_frequency_units = ALCANYNO,
+    alcohol_days_past_year = ALCDAYSYR,
+    smoking_days_past_30 = CIGDAYMO,
+    moderate_activity_minutes = MOD10DMIN,
+    vigorous_activity_minutes = VIG10DMIN,
+    fruit_intake = FRUTNO,
+    vegetable_intake = VEGENO,
+    juice_intake = JUICEMNO,
+    salad_intake = SALADSNO,
+    bean_intake = BEANNO,
+    salsa_intake = SALSAMNO,
+    tomato_sauce_intake = TOMSAUCEMNO,
+    soda_intake = SODAPNO,
+    fried_potatoes_intake = FRIESPNO,
+    sports_drink_intake = SPORDRMNO,
+    fruit_drink_intake = FRTDRINKMNO,
+    coffee_tea_intake = COFETEAMNO,
+    nonfried_potatoes_intake = POTATONO,
+    pizza_intake = PIZZANO,
+    hours_sleep = HRSLEEP,
+    covid_vaccination = CVDSHT
+  )
+
+```
+
+```{r}
+### Data Subsets
+
+# demographic + socioeconomic
+# identify population-level disparities in diabetes risk
+demo_socio <- nhis %>%
+  select(ever_had_diabetes, age, sex, marital_status, education_level, poverty_ratio, hours_worked_wk, hours_sleep)
+
+# body composition and health insurance
+# weight and insurance access affects diabetes risk
+body_health <- nhis %>%
+  select(ever_had_diabetes, height_in, weight_lb, bmi, age, sex,alcohol_days_past_year, smoking_days_past_30)
+
+# dietary habits
+# eating factors that are associated with diabetes risk
+diet <- nhis %>%
+  select(ever_had_diabetes, fruit_intake, vegetable_intake, juice_intake, salad_intake,soda_intake, fried_potatoes_intake, fruit_drink_intake, pizza_intake)
+
+# physical activity and sleep
+lifestyle <- nhis %>%
+  select(ever_had_diabetes, moderate_activity_minutes, vigorous_activity_minutes, hours_sleep)
+```
+
+### Linear SVM Model: Predicting Diabetes with Demographic and Socio-Economic Factors
+
+```{r}
+### Cleaning demographic and socio economic data
+demo_socio <- nhis %>%
+  select(ever_had_diabetes, age, sex, marital_status, poverty_ratio, hours_worked_wk, hours_sleep)
+summary(demo_socio)
+
+demo_socio <- demo_socio %>%
+  filter(
+    age >= 45 & age <= 65,                          # ages 45-65 
+    sex %in% c(1, 2),                               # 1 = Male, 2 = Female
+    marital_status %in% 1:8,                        # Valid codes
+    poverty_ratio >= 0 & poverty_ratio <= 37,       # Max observed 37
+    hours_worked_wk >= 0 & hours_worked_wk <= 95, 
+    hours_sleep >= 3 & hours_sleep <= 18            # Reasonable sleep
+  )
+summary(demo_socio)
+```
+
+```{r}
+### SVM on Diet Subset
+library(e1071)
+
+# Train-test split
+set.seed(1)
+index <- sample(1:nrow(demo_socio), 0.7 * nrow(demo_socio)) # 70/30 split
+train <- demo_socio[index, ]
+test <- demo_socio[-index, ]
+
+# (b) Fit SVM model
+svm_model <- svm(ever_had_diabetes ~ ., data = train, kernel = 'linear', cost = 1)
+
+# Summary statistics of SVM model
+summary(svm_model)
+
+# (c) Training error
+sum(predict(svm_model, train) != train$ever_had_diabetes)/nrow(train)
+
+# Test error
+sum(predict(svm_model, test) != test$ever_had_diabetes)/nrow(test)
+
+### Confusion Matrix
+true_values <- test$ever_had_diabetes  
+predicted_values <- predict(svm_model, newdata = test)
+conf_matrix <- table(true = true_values, pred = predicted_values)
+conf_matrix
+```
+
+```{r}
+### Undersample classes
+set.seed(1)
+
+# Subset each class
+no_cases <- demo_socio[demo_socio$ever_had_diabetes == "No", ]
+yes_cases <- demo_socio[demo_socio$ever_had_diabetes == "Yes", ]
+
+# Undersample 1000 from each class
+no_sample <- no_cases[sample(nrow(no_cases), 1000), ]
+yes_sample <- yes_cases[sample(nrow(yes_cases), 1000), ]
+
+# Combine into a balanced, undersampled dataset
+demo_socio_undersampled <- rbind(no_sample, yes_sample)
+
+# Shuffle rows
+demo_socio_undersampled <- demo_socio_undersampled[sample(nrow(demo_socio_undersampled)), ]
+
+# Check result
+table(demo_socio_undersampled$ever_had_diabetes)
+```
+
+```{r}
+### Cross-Validation SVM
+set.seed(1)
+
+# 70/30 train-test split
+index <- sample(1:nrow(demo_socio_undersampled), 0.7 * nrow(demo_socio_undersampled))
+train <- demo_socio_undersampled[index, ]
+test <- demo_socio_undersampled[-index, ]
+
+# Scale numeric predictors (excluding the target variable)
+train_scaled <- train %>%
+  mutate(across(-ever_had_diabetes, scale))
+
+test_scaled <- test %>%
+  mutate(across(-ever_had_diabetes, scale))
+
+
+# (d) Cross-validation on SVM models
+set.seed(1)
+tune_model <- tune(
+  svm, ever_had_diabetes ~ ., data = train_scaled,
+  kernel = "linear",
+  ranges = list(cost = c(1, 5, 10, 50, 100))
+)
+
+# Pick best model
+tune_model$best.parameters
+bestmod <- tune_model$best.model
+summary(bestmod)
+
+# (e) Training error with best model
+sum(predict(bestmod, train_scaled) != train_scaled$ever_had_diabetes)/nrow(train_scaled)
+
+# Test error with best model
+sum(predict(bestmod, test_scaled) != test_scaled$ever_had_diabetes)/nrow(test_scaled)
+```
+
+```{r}
+### Confusion Matrix
+true_values <- test_scaled$ever_had_diabetes  
+predicted_values <- predict(bestmod, newdata = test_scaled)
+
+conf_matrix <- table(true = true_values, pred = predicted_values)
+conf_matrix
+```
+
+```{r}
+### Plots
+plot(bestmod, train_scaled, age ~ hours_sleep)
+plot(bestmod, train_scaled, hours_worked_wk ~ hours_sleep)
+plot(bestmod, train_scaled, age ~ hours_worked_wk)
+plot(bestmod, train_scaled, age ~ poverty_ratio)
+plot(bestmod, train_scaled, age ~ marital_status)
+```
+
+### Polynomial SVM Model: Predicting Diabetes by Body Composition and Health Factors
+
+```{r}
+### Clean body and health data
+body_health <- nhis %>%
+  select(ever_had_diabetes, height_in, weight_lb, bmi, age, sex,alcohol_days_past_year, smoking_days_past_30)
+
+summary(body_health)
+library(dplyr)
+body_health <- body_health %>%
+  filter(
+    height_in >= 50 & height_in <= 84,         # 4ft 2in to 7ft
+    weight_lb >= 80 & weight_lb <= 500,        # 80–500 lbs
+    bmi >= 10 & bmi <= 70,                     # BMI range
+    age >= 45 & age <= 65,                    # Limit 45-65
+    sex %in% c(1, 2),                          # 1 = Male, 2 = Female 
+    alcohol_days_past_year <= 365,             # At most 365 days/year
+  )
+
+summary(body_health)
+```
+
+```{r}
+### Undersample classes
+set.seed(1)
+
+# Subset each class
+no_cases <- body_health[body_health$ever_had_diabetes == "No", ]
+yes_cases <- body_health[body_health$ever_had_diabetes == "Yes", ]
+
+# Undersample 1000 from each class
+no_sample <- no_cases[sample(nrow(no_cases), 873), ]
+yes_sample <- yes_cases[sample(nrow(yes_cases), 873), ]
+
+# Combine into a balanced, undersampled dataset
+health_undersampled <- rbind(no_sample, yes_sample)
+
+# Shuffle rows
+health_undersampled <- health_undersampled[sample(nrow(health_undersampled)), ]
+
+# Check result
+table(health_undersampled$ever_had_diabetes)
+```
+
+```{r}
+### Polynomial SVM Model (degree 2)
+set.seed(1)
+
+# 70/30 train-test split
+index <- sample(1:nrow(health_undersampled), 0.7 * nrow(health_undersampled))
+train <- health_undersampled[index, ]
+test <- health_undersampled[-index, ]
+
+# Scale numeric predictors (excluding the target variable)
+train_scaled <- train %>%
+  mutate(across(-ever_had_diabetes, scale))
+
+test_scaled <- test %>%
+  mutate(across(-ever_had_diabetes, scale))
+
+# (b) Fit the SVM model with a polynomial kernel
+svm_model <- svm(ever_had_diabetes ~ ., data = train_scaled, kernel = 'polynomial', degree = 2, cost = 1)
+
+# Summary statistics of the SVM model
+summary(svm_model)
+
+# (c) Training error
+ypred <- predict(svm_model, newdata = train_scaled)
+mean(ypred != train_scaled$ever_had_diabetes)
+
+# (d) Test error
+ypred_test <- predict(svm_model, newdata = test_scaled)
+mean(ypred_test != test_scaled$ever_had_diabetes) 
+
+### Confusion Matrix
+true_values <- test_scaled$ever_had_diabetes  
+predicted_values <- predict(svm_model, newdata = test_scaled)
+conf_matrix <- table(true = true_values, pred = predicted_values)
+conf_matrix
+```
+
+```{r}
+### Polynomial SVM Model (degree 3)
+# (b) Fit the SVM model with a polynomial kernel
+svm_model <- svm(ever_had_diabetes ~ ., data = train_scaled, kernel = 'polynomial', degree = 3, cost = 1)
+
+# Summary statistics of the SVM model
+summary(svm_model)
+
+# (c) Training error
+ypred <- predict(svm_model, newdata = train_scaled)
+mean(ypred != train_scaled$ever_had_diabetes)
+
+# (d) Test error
+ypred_test <- predict(svm_model, newdata = test_scaled)
+mean(ypred_test != test_scaled$ever_had_diabetes) 
+
+### Confusion Matrix
+true_values <- test_scaled$ever_had_diabetes  
+predicted_values <- predict(svm_model, newdata = test_scaled)
+conf_matrix <- table(true = true_values, pred = predicted_values)
+conf_matrix
+```
+
+```{r}
+# (e) Cross-validation for tuning the model
+# cv model
+set.seed(1)
+tune_model <- tune(svm, ever_had_diabetes ~ ., 
+                   data = train_scaled, 
+                   kernel = "polynomial", 
+                   ranges = list(cost = c(0.1, 1, 5, 10, 50, 100),
+                                 degree = c(2,3,4)))
+
+# Pick the best model based on cross-validation results
+bestmod <- tune_model$best.model
+summary(bestmod)
+
+# (f) Training error for the best model:
+ypred_best <- predict(bestmod, newdata = train_scaled)
+mean(ypred_best != train_scaled$ever_had_diabetes)
+
+# (g) Test error for the best model:
+ypred_best_test <- predict(bestmod, newdata = test_scaled)
+mean(ypred_best_test != test_scaled$ever_had_diabetes) 
+
+### Confusion Matrix
+true_values <- test_scaled$ever_had_diabetes  
+predicted_values <- predict(bestmod, newdata = test_scaled)
+
+conf_matrix <- table(true = true_values, pred = predicted_values)
+conf_matrix
+```
+
+```{r}
+# Load ROCR library
+library(ROCR)
+
+# Re-train the best model with probability = TRUE
+bestmod <- svm(
+  ever_had_diabetes ~ ., 
+  data = train_scaled, 
+  kernel = "polynomial", 
+  cost = tune_model$best.parameters$cost, 
+  degree = tune_model$best.parameters$degree,
+  probability = TRUE
+)
+
+# Predict on the test set with probabilities
+svm_probs <- predict(bestmod, newdata = test_scaled, probability = TRUE)
+
+# Extract the probabilities for class "Yes"
+svm_probs_attr <- attr(svm_probs, "probabilities")
+prob_yes <- svm_probs_attr[, "Yes"]
+
+# Convert true labels to binary (0 = No, 1 = Yes)
+truth <- ifelse(test_scaled$ever_had_diabetes == "Yes", 1, 0)
+
+# Define ROC plotting function
+rocplot <- function(pred, truth, ...) {
+  predob <- prediction(pred, truth)
+  perf <- performance(predob, "tpr", "fpr")
+  plot(perf, ...)
+}
+
+# Plot the ROC curve
+rocplot(prob_yes, truth, col = "darkgreen", main = "ROC Curve - Polynomial SVM")
+
+```
+
+```{r}
+### plots
+plot(bestmod, train_scaled, age ~ bmi)
+plot(bestmod, train_scaled, age ~ alcohol_days_past_year)
+```
+
+### Radial SVM Model: Predicting Diabetes using Dietary Habits
+
+```{r}
+### Data cleaning Diet subset
+library(e1071)
+
+# subset data
+diet <- nhis %>%
+  select(ever_had_diabetes, fruit_intake, vegetable_intake, juice_intake, salad_intake,soda_intake, fried_potatoes_intake, fruit_drink_intake, pizza_intake)
+
+# viewing some outliers
+summary(diet)
+
+# removing outlier values (anything greter than 100)
+library(dplyr)
+diet <- diet %>%
+  filter(if_all(-ever_had_diabetes, ~ . <= 100))
+summary(diet)
+```
+
+```{r}
+### Undersample classes
+set.seed(1)
+
+# Subset each class
+no_cases <- diet[diet$ever_had_diabetes == "No", ]
+yes_cases <- diet[diet$ever_had_diabetes == "Yes", ]
+
+# Undersample 1000 from each class
+no_sample <- no_cases[sample(nrow(no_cases), 1000), ]
+yes_sample <- yes_cases[sample(nrow(yes_cases), 1000), ]
+
+# Combine into a balanced, undersampled dataset
+diet_undersampled <- rbind(no_sample, yes_sample)
+
+# Shuffle rows
+diet_undersampled <- diet_undersampled[sample(nrow(diet_undersampled)), ]
+
+# Check result
+table(diet_undersampled$ever_had_diabetes)
+```
+
+```{r}
+### Radial SVM Model
+set.seed(1)
+
+# 70/30 train-test split
+index <- sample(1:nrow(diet_undersampled), 0.7 * nrow(diet_undersampled))
+train <- diet_undersampled[index, ]
+test <- diet_undersampled[-index, ]
+
+# Scale numeric predictors (excluding the target variable)
+train_scaled <- train %>%
+  mutate(across(-ever_had_diabetes, scale))
+
+test_scaled <- test %>%
+  mutate(across(-ever_had_diabetes, scale))
+
+# (b) Fit the SVM model
+svm_model <- svm(ever_had_diabetes ~ ., data = train_scaled, kernel = 'radial', gamma =1, cost = 1)
+
+# Summary statistics of SVM model
+summary(svm_model)
+
+# (c) Training error
+ypred_train <- predict(svm_model, newdata = train_scaled)
+mean(ypred_train != train_scaled$ever_had_diabetes)
+
+# (d) Test error
+ypred_test <- predict(svm_model, newdata = test_scaled)
+mean(ypred_test != test_scaled$ever_had_diabetes)
+
+### Confusion Matrix
+true_values <- test_scaled$ever_had_diabetes  
+predicted_values <- predict(svm_model, newdata = test_scaled)
+
+conf_matrix <- table(true = true_values, pred = predicted_values)
+conf_matrix
+```
+
+```{r}
+# (e) Cross-validation for Radial SVM Model
+
+# (f) Cross-validation for tuning the radial SVM model
+set.seed(1)
+tune_model <- tune(svm, ever_had_diabetes ~ ., 
+                   data = train_scaled, 
+                   kernel = "radial", 
+                   ranges = list(cost = c(0.1, 1, 5, 10, 50),
+                                 gamma = c(0.001, 0.01, 0.1, 0.5, 1)),
+                   tunecontrol = tune.control(cross = 5))
+
+# Pick the best model based on cross-validation results
+bestmod <- tune_model$best.model
+tune_model$best.parameters$gamma
+summary(bestmod)
+
+# (g) Training error for the best model
+ypred_best <- predict(bestmod, newdata = train_scaled)
+mean(ypred_best != train_scaled$ever_had_diabetes)
+
+# (h) Test error for the best model
+ypred_best_test <- predict(bestmod, newdata = test_scaled )
+mean(ypred_best_test != test_scaled $ever_had_diabetes)
+
+### Confusion Matrix
+true_values <- test_scaled $ever_had_diabetes  
+predicted_values <- predict(bestmod, newdata = test_scaled )
+
+conf_matrix <- table(true = true_values, pred = predicted_values)
+conf_matrix
+```
+
+```{r}
+### ROC CURVE 
+library(ROCR)
+
+# Re-train radial SVM with probability = TRUE
+bestmod <- svm(
+  ever_had_diabetes ~ ., 
+  data = train_scaled, 
+  kernel = "radial", 
+  cost = tune_model$best.parameters$cost, 
+  gamma = tune_model$best.parameters$gamma,
+  probability = TRUE
+)
+
+# Predict on test set with probability output
+svm_probs <- predict(bestmod, newdata = test_scaled, probability = TRUE)
+
+# Extract probabilities for class "Yes"
+svm_probs_attr <- attr(svm_probs, "probabilities")
+prob_yes <- svm_probs_attr[, "Yes"]
+
+# Convert true labels to binary (0 = No, 1 = Yes)
+truth <- ifelse(test_scaled$ever_had_diabetes == "Yes", 1, 0)
+
+# Define the ROC plotting function
+rocplot <- function(pred, truth, ...) {
+  predob <- prediction(pred, truth)
+  perf <- performance(predob, "tpr", "fpr")
+  plot(perf, ...)
+}
+
+# Plot ROC
+rocplot(prob_yes, truth, col = "blue", main = "ROC Curve - Radial SVM")
+```
+
+```{r}
+### Plots
+plot(bestmod, train_scaled, fruit_intake ~ vegetable_intake)
+plot(bestmod, train_scaled, salad_intake ~ fruit_intake)
+```
+
+### Testing Linear SVM: Predicting Diabetes using Dietary Habits
+
+\*\* Check if Radial model is too complex or if dietary habits simply does not explain diabetes
+
+```{r}
+### Cross-Validation Linear SVM
+
+# (d) Cross-validation on SVM models
+set.seed(1)
+tune_model <- tune(
+  svm, ever_had_diabetes ~ ., data = train_scaled,
+  kernel = "linear",
+  ranges = list(cost = c(1, 5, 10, 50, 100))
+)
+
+# Pick best model
+tune_model$best.parameters
+bestmod <- tune_model$best.model
+summary(bestmod)
+
+# (e) Training error with best model
+sum(predict(bestmod, train_scaled) != train_scaled$ever_had_diabetes)/nrow(train_scaled)
+
+# Test error with best model
+sum(predict(bestmod, test_scaled) != test_scaled$ever_had_diabetes)/nrow(test_scaled)
+```
